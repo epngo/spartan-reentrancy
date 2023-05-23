@@ -1,3 +1,7 @@
+# SpartanScript
+
+SpartanScript is a scripting language written in javascript for writing smart contracts. 
+
 # SpartanGold
 
 SpartanGold (SG) is a simplified blockchain-based cryptocurrency for education and experimentation.
