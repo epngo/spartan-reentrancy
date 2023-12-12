@@ -6,6 +6,10 @@ let Miner = require("./miner.js");
 let Transaction = require("./transaction.js");
 let SpartanScriptBlock = require("./spartan-script-block.js");
 
+
+//let Reentrancy = require("./reentrancy-contract.js");
+let Reentrancy = require("./test-contract.js");
+
 let FakeNet = require("./fake-net.js");
 let utils = require("./utils.js");
 
@@ -28,8 +32,8 @@ let smartContract1 = new Client({ name: "SmartContract1", net: fakeNet });
 let smartContract2 = new Client({ name: "SmartContract2", net: fakeNet });
 let smartContract3 = new Client({ name: "SmartContract3", net: fakeNet });
 let smartContract4 = new Client({ name: "SmartContract4", net: fakeNet });
-let smartContract6 = new Client({ name: "SmartContract6", net: fakeNet });
-let smartContract7 = new Client({ name: "SmartContract6", net: fakeNet });
+
+let smartContractTest = new Reentrancy({ name: "SmartContractTest", net: fakeNet });
 
 // Creating genesis block
 let genesis = Blockchain.makeGenesis({
@@ -45,8 +49,8 @@ let genesis = Blockchain.makeGenesis({
     [smartContract2, 100],
     [smartContract3, 100],
     [smartContract4, 100],
-    [smartContract6, 50],
-    [smartContract7, 50],
+
+    [smartContractTest, 100],
   ]),
 });
 // Late miner - Donald has more mining power, represented by the miningRounds.
@@ -93,18 +97,20 @@ function showBalances(client) {
       smartContract4.address
     )} gold.`
   );
+  
+  // Smart Contract Test
   console.log(
-    `Smart Contract 6 has ${client.lastBlock.balanceOf(
-      smartContract6.address
+    `Smart Contract Test has ${client.lastBlock.balanceOf(
+      smartContractTest.address
     )} gold.`
-  );
+  )
 }
 
 // Showing the initial balances from Alice's perspective, for no particular reason.
 console.log("Initial balances:");
 showBalances(alice);
 
-fakeNet.register(alice, bob, charlie, minnie, smartContract1, smartContract6);
+fakeNet.register(alice, bob, charlie, minnie, smartContract1, smartContractTest);
 
 // Miners start mining.
 minnie.initialize();
@@ -117,23 +123,20 @@ let script2 =
 //let script3 = '(provide transferGold)(define transferGold(lambda (addr1 addr2 amount)(if (== (% $timestamp 2) 0)($transfer amount addr1)($transfer amount addr2))))';
 // let script4 = '(provide getgold balance)(define getgold (lambda (amt dest) ($transfer amt dest)))(define balance (lambda () ($balance $me)))';
 
+// smartContractTest script
+// eventually, make the script an reentrancy attack
+let smartContractTestScript =
+  "(provide getgold balance)(define getgold (lambda (amt dest) ($transfer amt dest)))(define balance (lambda () ($balance $me)))";
+
 let smartContract1Scripthashtest =
   "(provide getgold balance)(define getgold (lambda (amt dest) ($transfer amt dest)))(define balance (lambda () ($balance $me)))        ";
 
 let script5 =
   "(provide counter)(defineState val)(define counter (lambda () (set! val (+ val 1))(+ 4 5)))";
 
-//let script3 = fs.readFileSync("./spartan-script/test-scripts/timestamp.scm").toString();
+let script3 = fs.readFileSync("./spartan-script/test-scripts/timestamp.scm").toString();
 let script4 = fs
   .readFileSync("./spartan-script/test-scripts/erc20.scm")
-  .toString();
-
-let script6 = fs
-  .readFileSync("./reentrancy-balance.scm")
-  .toString();
-
-let script7 = fs
-  .readFileSync("./reentrancy-attack.scm")
   .toString();
 
 // Alice transfers some money to Bob.
@@ -159,6 +162,39 @@ alice.postGenericTransaction({
   },
 });
 
+
+console.log(`Running smart contract test`);
+bob.postGenericTransaction({
+  data: {
+    type: "ContractDeclaration",
+    scriptHash: utils.hashContract(smartContractTestScript),
+    scriptContent: smartContractTestScript,
+    address: smartContractTest.address,
+  },
+});
+bob.postGenericTransaction({
+  data: {
+    type: "ContractInvocation",
+    scriptHash: utils.hashContract(smartContractTestScript),
+    call: `(getgold 20 ${alice.address}) (balance) (define a 4)`,
+    address: smartContractTest.address,
+    gasLimit: 200,
+  },
+});
+
+/*
+// reentrancy
+alice.postGenericTransaction({
+  data: {
+    type: "Withdraw",
+    scriptHash: utils.hashContract(smartContract1Script),
+    call: `(getgold 20 ${alice.address}) (balance) (define a 4)`,
+    address: smartContract1.address,
+    gasLimit: 200,
+  },
+});
+*/
+
 // console.log(`Running smart contract 2`);
 // console.log(alice.postGenericTransaction({data: { type: 'ContractDeclaration', scriptHash: 2, scriptContent: script2, address: smartContract2.address }}));
 // console.log(alice.postGenericTransaction({data: { type: 'ContractInvocation', scriptHash: 2, call: `(counter) (counter) (counter)`, address: smartContract2.address, gasLimit: 20 }}));
@@ -167,70 +203,30 @@ alice.postGenericTransaction({
 // console.log(alice.postGenericTransaction({data: { type: 'ContractDeclaration', scriptHash: 3, scriptContent: script3, address: smartContract3.address }}));
 // console.log(alice.postGenericTransaction({data: { type: 'ContractInvocation', scriptHash: 3, call: `(transferGold ${alice.address} ${bob.address} 10)`, address: smartContract3.address, gasLimit: 200 }}));
 
-//make a constructor call using reentrancy-balance.scm
-let constructorCall = '(define my-account (make-account 50))';
+// let constructorCall = `(defineState totalSupply 200)(defineState balances makeMap)(defineState allowed makeMap)(setMap balances $sender totalSupply)`;
 
-// set up calls from reentrancy-balance.scm
-let calls = '(begin ((my-account deposit) 50) ((my-account withdraw) 30) ((my-account balance)))';
+// let calls = `(totalSupply)(balanceOf $sender)(transfer ${bob.address} 25)`;
 
-console.log(`Running Back Account smart contract`);
+// console.log(`Running smart contract 4`);
 
-alice.postGenericTransaction({
-  data: {
-    type: "ContractDeclaration",
-    scriptHash: utils.hashContract(script6),
-    scriptContent: script6,
-    address: smartContract6.address,
-  },
-});
+// alice.postGenericTransaction({
+//   data: {
+//     type: "ContractDeclaration",
+//     scriptHash: utils.hashContract(script4),
+//     scriptContent: script4,
+//     address: smartContract4.address,
+//   },
+// });
 
-alice.postGenericTransaction({
-  data: {
-    type: "ContractInvocation",
-    scriptHash: utils.hashContract(script6),
-    call: constructorCall + calls,
-    address: smartContract6.address,
-    gasLimit: 200,
-  },
-});
-
-console.log(`Running Attack smart contract`);
-
-alice.postGenericTransaction({
-  data: {
-    type: "ContractDeclaration",
-    scriptHash: utils.hashContract(script7),
-    scriptContent: script7,
-    address: smartContract6.address,
-  },
-});
-
-/*
-let constructorCall = `(defineState totalSupply 200)(defineState balances makeMap)(defineState allowed makeMap)(setMap balances $sender totalSupply)`;
-
-let calls = `(totalSupply)(balanceOf $sender)(transfer ${bob.address} 25)`;
-
-console.log(`Running smart contract 4`);
-
-alice.postGenericTransaction({
-  data: {
-    type: "ContractDeclaration",
-    scriptHash: utils.hashContract(script4),
-    scriptContent: script4,
-    address: smartContract4.address,
-  },
-});
-
-alice.postGenericTransaction({
-  data: {
-    type: "ContractInvocation",
-    scriptHash: utils.hashContract(script4),
-    call: constructorCall + calls,
-    address: smartContract4.address,
-    gasLimit: 200,
-  },
-});
-*/
+// alice.postGenericTransaction({
+//   data: {
+//     type: "ContractInvocation",
+//     scriptHash: utils.hashContract(script4),
+//     call: constructorCall + calls,
+//     address: smartContract4.address,
+//     gasLimit: 200,
+//   },
+// });
 
 // let bobCall = `(approve ${charlie.address} 50)(allowance ${bob.address} ${charlie.address})`;
 
@@ -290,6 +286,10 @@ setTimeout(() => {
   showBalances(smartContract1);
 
   console.log();
+  console.log("Final balances (Smart contract test's perspective):");
+  showBalances(smartContractTest);
+
+  console.log();
   console.log("Final balances (Minnie's perspective):");
   showBalances(minnie);
 
@@ -298,8 +298,8 @@ setTimeout(() => {
   showBalances(alice);
 
   console.log();
-  console.log("Final balances (Smart contract 6's perspective):");
-  showBalances(smartContract6);
+  console.log("Final balances (Bob's perspective):");
+  showBalances(bob);
 
   // console.log();
   // console.log("Final balances (Donald's perspective):");
