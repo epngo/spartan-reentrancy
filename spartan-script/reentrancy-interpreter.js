@@ -19,6 +19,7 @@ const GASPRICES = {
   TRANSFER: 15,
   BALANCE: 10,
   DEFINE: 3,
+  DEFINE_R: 3,
   GETMAP: 5,
   SETMAP: 7,
   HASMAP: 5,
@@ -54,6 +55,9 @@ module.exports = class SpartanScriptInterpreter {
     );
 
     this.globalEnv = null;
+
+    this.reentrancyFlag = false;
+    this.contractCode = tx.data.code;
   }
 
   tokenize(contents) {
@@ -99,7 +103,7 @@ module.exports = class SpartanScriptInterpreter {
     );
   }
 
-  evaluate(ast, env) {
+  evaluate(ast, env, isReentrant) {
     if (ast.type == NUM) {
       return ast.value;
     } else if (ast.value == "$me") {
@@ -126,6 +130,11 @@ module.exports = class SpartanScriptInterpreter {
     if (this.gasCurr >= this.gasLimit) {
       throw new GasLimitReachedError(this.$me);
     }
+
+    /*
+    if (this.reentrancyFlag) {
+      throw new Error("Reentrancy detected. Aborting.");
+    }*/
 
     switch (first.value) {
       case "$balance":
@@ -166,9 +175,20 @@ module.exports = class SpartanScriptInterpreter {
         });
         break;
       case "define":
-        this.gasCurr += GASPRICES.DEFINE;
-        env.varMap.set(second.value, this.evaluate(third, env));
-        break;
+        if(isReentrant) {
+          // make a mark that the contract has a reentrancy attack
+          this.reentrancyFlag = true;
+          console.log(`Reentrancy Vulnerability Detected.`);
+
+          this.gasCurr += GASPRICES.DEFINE_R;
+          env.varMap.set(second.value, this.evaluate(third, env));
+          break;
+        } 
+        else {
+          this.gasCurr += GASPRICES.DEFINE;
+          env.varMap.set(second.value, this.evaluate(third, env));
+          break;
+        }
       case "defineState":
         this.gasCurr += GASPRICES.DEFINESTATE;
         this.contractStateVariables.set(
@@ -348,11 +368,17 @@ module.exports = class SpartanScriptInterpreter {
     let tokens = this.tokenize(script);
     let asts = this.parse(tokens);
     // console.log(this.printAST(asts));
+    let isReentrant = this.checkReentrancyAttack(script);
 
     try {
       asts.forEach((ast) => {
         // this.printAST(ast, env);
-        this.evaluate(ast, env);
+        if (isReentrant) {
+          this.evaluate(ast, env, isReentrant);
+        }
+        else {
+          this.evaluate(ast, env, false);
+        }
         // console.log("Final value -> ", this.evaluate(ast, env), this.gasCurr);
       });
     } catch (error) {
@@ -365,14 +391,170 @@ module.exports = class SpartanScriptInterpreter {
       console.log(error);
     }
 
+    
+
     for (let [key, value] of this.currBalances) {
       this.prevBalances.set(key, value);
     }
     for (let [key, value] of this.contractStateVariables) {
       this.prevContractStateVarible.set(key, value);
     }
-    return { gasUsed: this.gasCurr };
+    return { gasUsed: this.gasCurr, checkReentrant: isReentrant };
   }
+
+  checkReentrancyAttack(script) {
+    // Regular expression to find withdraw function definition
+    let withdrawRegex = /\(define\s+withdraw\s+\(lambda\s+\(([^)]*)\)\s+\(([^)]*)\)/g;
+    let matches;
+    let isVulnerable = false;
+
+    while ((matches = withdrawRegex.exec(script)) !== null) {
+      let functionBody = matches[2];
+
+      // Check if the function body does transactions
+      if (!functionBody.includes("(defineState") && (functionBody.includes("$transfer") || functionBody.includes("$balanceOf") 
+            || functionBody.includes("$allowance") || functionBody.includes("$approve") || functionBody.includes("$transferFrom"))){
+        // Check if balance is set to 0 after transfer
+        let balanceReset = /\(hash-set!\s+balances\s+\(cadr\s+msg\)\s+0\)/;
+        let balanceResetMatches = balanceReset.exec(functionBody);
+        if (!balanceResetMatches) {
+          isVulnerable = true;
+          //console.log(`Reentrancy Attack Detected.`);
+        }
+      }
+    }
+
+    return isVulnerable;
+  }
+
+
+  /*
+  detectReentrancy(ast) {
+    for (i = 0; i < ast.body.length; i++) {
+      if (ast.children[i] === "withdraw") {
+        let stateChangeBeforeExternalCall = false;
+        let externalCallExists = false;
+  
+        for (let statement of ast.body[i].body) {
+          if (isStateChange(statement)) {
+            stateChangeBeforeExternalCall = true;
+          }
+  
+          if (isExternalCall(statement)) {
+            externalCallExists = true;
+            if (!stateChangeBeforeExternalCall) {
+              throw new Error('Potential reentrancy attack detected.');
+              // this.reentrancyFlag = true;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Function to detect potential reentrancy vulnerabilities
+  detectReentrancyVulnerabilities(ast) {
+    const reentrancyVulnerabilities = [];
+
+    // Look for lambda expressions defining contract functions
+    ast.body.forEach(node => {
+        if (node.type === 'VariableDeclaration' && node.declarations[0].init.type === 'CallExpression') {
+            const functionName = node.declarations[0].id.name;
+            const functionBody = node.declarations[0].init.arguments[1].body;
+
+            // Look for withdraw function
+            if (functionName === 'DepositFunds') {
+                const balances = findBalancesDeclaration(functionBody);
+
+                // Look for withdraw case
+                if (balances) {
+                    const withdrawCases = findWithdrawCases(functionBody, balances);
+                    if (withdrawCases.length > 0) {
+                        reentrancyVulnerabilities.push({
+                            function: functionName,
+                            cases: withdrawCases
+                        });
+                    }
+                }
+            }
+        }
+    });
+
+    return reentrancyVulnerabilities;
+  }
+
+  // Helper function to find balances declaration
+  findBalancesDeclaration(node) {
+    if (node.type === 'CallExpression' && node.callee.name === 'make-hash') {
+        return node;
+    } else if (node.body) {
+        for (const childNode of node.body) {
+            const result = findBalancesDeclaration(childNode);
+            if (result) return result;
+        }
+    }
+    return null;
+  }
+
+  // Helper function to find withdraw cases
+  findWithdrawCases(node, balances) {
+    const withdrawCases = [];
+
+    if (node.type === 'CallExpression' && node.callee.name === 'case') {
+        for (const branch of node.arguments.slice(1)) {
+            if (branch.type === 'ArrayExpression' && branch.elements[0].value === 'withdraw') {
+                const withdrawBody = branch.elements[1];
+                const balance = findHashRefUsage(withdrawBody, balances);
+
+                if (balance) {
+                    const sent = findSentFunds(withdrawBody);
+                    withdrawCases.push({
+                        body: withdrawBody,
+                        balance,
+                        sent
+                    });
+                }
+            }
+        }
+    } else if (node.body) {
+        for (const childNode of node.body) {
+            const result = findWithdrawCases(childNode, balances);
+            withdrawCases.push(...result);
+        }
+    }
+
+    return withdrawCases;
+  }
+
+  // Helper function to find hash-ref usage in withdraw function
+  findHashRefUsage(node, balances) {
+    if (node.type === 'CallExpression' && node.callee.name === 'hash-ref' && node.arguments[0].name === balances.declarations[0].id.name) {
+        return node.arguments[1];
+    } else if (node.body) {
+        for (const childNode of node.body) {
+            const result = findHashRefUsage(childNode, balances);
+            if (result) return result;
+        }
+    }
+    return null;
+  }
+
+  // Helper function to find sent variable usage in withdraw function
+  findSentFunds(node) {
+    if (node.type === 'CallExpression' && node.callee.name === 'set!') {
+        if (node.arguments[0].name === 'sent') {
+            return node.arguments[1];
+        }
+    } else if (node.body) {
+        for (const childNode of node.body) {
+            const result = findSentFunds(childNode);
+            if (result) return result;
+        }
+    }
+    return null;
+  }
+  */
+
 };
 
 class ScopingEnvironment {

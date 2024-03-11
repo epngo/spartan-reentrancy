@@ -1,7 +1,8 @@
 "use strict";
 
 const Block = require("./block.js");
-const SpartanScriptInterpreter = require("./spartan-script/spartan-script-interpreter.js");
+//const SpartanScriptInterpreter = require("./spartan-script/spartan-script-interpreter.js");
+const SpartanScriptInterpreter = require("./spartan-script/reentrancy-interpreter.js");
 
 /**
  * A special block collection of transactions and smart contracts, with a hash connecting it
