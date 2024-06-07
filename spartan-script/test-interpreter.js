@@ -19,6 +19,7 @@ const GASPRICES = {
   TRANSFER: 15,
   BALANCE: 10,
   DEFINE: 3,
+  DEFINE_R: 3,
   GETMAP: 5,
   SETMAP: 7,
   HASMAP: 5,
@@ -54,6 +55,9 @@ module.exports = class SpartanScriptInterpreter {
     );
 
     this.globalEnv = null;
+
+    this.reentrancyFlag = false;
+    this.contractCode = tx.data.code;
   }
 
   tokenize(contents) {
@@ -99,93 +103,7 @@ module.exports = class SpartanScriptInterpreter {
     );
   }
 
-  detectReentrancy(ast) {
-    // Check if any function does transactions
-    const transactions = ["TRANSFER", "SEND", "CALL"];
-    const transactionOps = ast.children.filter(node => node.type === OP && transactions.includes(node.value));
-    
-    // Check if any transaction lacks locks and modifiers
-    if (transactionOps.length > 0 && !this.hasLocksAndModifiers(ast)) {
-      return true;
-    }
-
-    // Check if account balance update follows checks-effects-interactions pattern
-    if (this.checksEffectsInteractions(ast)) {
-      return true;
-    }
-
-    return false;
-  }
-
-  hasLocksAndModifiers(ast) {
-    // Define the list of functions that should have locks and modifiers
-    const functionsRequiringLocks = ["TRANSFER", "SEND", "CALL"];
-    
-    // Iterate through the AST to find if any of the required functions exist without locks and modifiers
-    for (let node of ast.children) {
-      if (node.type === OP && functionsRequiringLocks.includes(node.value)) {
-        // Check if locks and modifiers are present
-        if (!this.hasLocksAndModifiersHelper(node)) {
-          return false; // Reentrancy vulnerability detected (flag)
-        }
-      }
-    }
-    
-    return true; // No reentrancy vulnerability detected
-  }
-
-  hasLocksAndModifiersHelper(functionNode) {
-    // Check if the function is wrapped within the noReentrant function
-    if (functionNode.type === VAR && functionNode.value === "noReentrant") {
-      return true; // The function has locks and modifiers
-    }
-    
-    // If the function is not directly wrapped within noReentrant, check its children
-    for (let child of functionNode.children) {
-      if (!this.hasLocksAndModifiersHelper(child)) {
-        return false; // Reentrancy vulnerability detected in nested function (flag)
-      }
-    }
-    
-    // No reentrancy vulnerability detected in the function
-    return true;
-  }
-
-  checksEffectsInteractions(ast) {
-    // Define the list of functions that perform interactions
-    const interactionFunctions = ["TRANSFER", "SEND", "CALL"];
-  
-    // Track if checks and effects have been encountered
-    let checks = false;
-    let effects = false;
-  
-    // Iterate through the AST to check for checks-effects-interactions pattern
-    for (let node of ast.children) {
-      if (node.type === OP && interactionFunctions.includes(node.value)) {
-        // If interactions are found before effects, return false (violation of pattern)
-        if (!checks || !effects) {
-          return false;
-        }
-        // Reset checks to false after encountering effects
-        checks = false;
-      } else if (node.type === OP && node.value === "require") {
-        // Mark checks as true when require function is encountered
-        checks = true;
-      } else if (node.type === OP && ["define", "defineState"].includes(node.value)) {
-        // Mark effects as true when define or defineState function is encountered
-        effects = true;
-      }
-    }
-  
-    // If there are no interactions or if effects were not encountered, return false
-    if (!effects) {
-      return false;
-    }
-  
-    return true; // Checks-effects-interactions pattern detected
-  }  
-
-  evaluate(ast, env) {
+  evaluate(ast, env, isReentrant) {
     if (ast.type == NUM) {
       return ast.value;
     } else if (ast.value == "$me") {
@@ -213,6 +131,11 @@ module.exports = class SpartanScriptInterpreter {
       throw new GasLimitReachedError(this.$me);
     }
 
+    /*
+    if (this.reentrancyFlag) {
+      throw new Error("Reentrancy detected. Aborting.");
+    }*/
+
     switch (first.value) {
       case "$balance":
         this.gasCurr += GASPRICES.BALANCE;
@@ -230,6 +153,11 @@ module.exports = class SpartanScriptInterpreter {
         return this.currBalances.get($me);
       case "$transfer":
         this.gasCurr += GASPRICES.TRANSFER;
+
+        if (this.sender !== this.$me || this.gasCurr >= this.gasLimit) {
+          throw new Error("Reentrancy detected");
+        }
+        
         let destination = this.evaluate(third, env);
         let amount = this.evaluate(second, env);
         console.log('TRANSFER', destination, amount);
@@ -252,19 +180,20 @@ module.exports = class SpartanScriptInterpreter {
         });
         break;
       case "define":
-        this.gasCurr += GASPRICES.DEFINE;
-        env.varMap.set(second.value, this.evaluate(third, env));
-        break;
-      case "define-r":
-        // Check for reentrancy vulnerability
-        if (this.detectReentrancy(third)) {
-          // If reentrancy vulnerability is detected, throw an error and halt execution
-          console.log("Reentrancy vulnerability detected!");
-          throw new Error("Reentrancy vulnerability detected.");
+        if(isReentrant) {
+          // make a mark that the contract has a reentrancy attack
+          this.reentrancyFlag = true;
+          console.log(`Reentrancy Vulnerability Detected.`);
+
+          this.gasCurr += GASPRICES.DEFINE_R;
+          env.varMap.set(second.value, this.evaluate(third, env));
+          break;
+        } 
+        else {
+          this.gasCurr += GASPRICES.DEFINE;
+          env.varMap.set(second.value, this.evaluate(third, env));
+          break;
         }
-        this.gasCurr += GASPRICES.DEFINE;
-        env.varMap.set(second.value, this.evaluate(third, env));
-        break;
       case "defineState":
         this.gasCurr += GASPRICES.DEFINESTATE;
         this.contractStateVariables.set(
@@ -444,19 +373,17 @@ module.exports = class SpartanScriptInterpreter {
     let tokens = this.tokenize(script);
     let asts = this.parse(tokens);
     // console.log(this.printAST(asts));
-
-    // Check for reentrancy vulnerabilities
-    if (this.detectReentrancy(asts)) {
-      // Handle reentrancy vulnerability
-      console.log("Reentrancy vulnerability detected.");
-      this.reentrancyDetected = true; // Set flag for reentrancy detected
-      return { gasUsed: 0 }; // Return gas used as 0
-    }
+    let isReentrant = this.checkReentrancyAttack(script);
 
     try {
       asts.forEach((ast) => {
         // this.printAST(ast, env);
-        this.evaluate(ast, env);
+        if (isReentrant) {
+          this.evaluate(ast, env, isReentrant);
+        }
+        else {
+          this.evaluate(ast, env, false);
+        }
         // console.log("Final value -> ", this.evaluate(ast, env), this.gasCurr);
       });
     } catch (error) {
@@ -467,8 +394,9 @@ module.exports = class SpartanScriptInterpreter {
 
       // Log other errors
       console.log(error);
-      // return { error: error.message };
     }
+
+    
 
     for (let [key, value] of this.currBalances) {
       this.prevBalances.set(key, value);
@@ -476,8 +404,162 @@ module.exports = class SpartanScriptInterpreter {
     for (let [key, value] of this.contractStateVariables) {
       this.prevContractStateVarible.set(key, value);
     }
-    return { gasUsed: this.gasCurr };
+    return { gasUsed: this.gasCurr, checkReentrant: isReentrant };
   }
+
+  checkReentrancyAttack(script) {
+    // Regular expression to find withdraw function definition
+    let withdrawRegex = /\(define\s+withdraw\s+\(lambda\s+\(([^)]*)\)\s+\(([^)]*)\)/g;
+    let matches;
+    let isVulnerable = false;
+
+    while ((matches = withdrawRegex.exec(script)) !== null) {
+      let functionBody = matches[2];
+
+      // Check if the function body does transactions
+      if (!functionBody.includes("(defineState") && (functionBody.includes("$transfer") || functionBody.includes("$balanceOf") 
+            || functionBody.includes("$allowance") || functionBody.includes("$approve") || functionBody.includes("$transferFrom"))){
+        // Check if balance is set to 0 after transfer
+        let balanceReset = /\(hash-set!\s+balances\s+\(cadr\s+msg\)\s+0\)/;
+        let balanceResetMatches = balanceReset.exec(functionBody);
+        if (!balanceResetMatches) {
+          isVulnerable = true;
+          //console.log(`Reentrancy Attack Detected.`);
+        }
+      }
+    }
+
+    return isVulnerable;
+  }
+
+
+  /*
+  detectReentrancy(ast) {
+    for (i = 0; i < ast.body.length; i++) {
+      if (ast.children[i] === "withdraw") {
+        let stateChangeBeforeExternalCall = false;
+        let externalCallExists = false;
+  
+        for (let statement of ast.body[i].body) {
+          if (isStateChange(statement)) {
+            stateChangeBeforeExternalCall = true;
+          }
+  
+          if (isExternalCall(statement)) {
+            externalCallExists = true;
+            if (!stateChangeBeforeExternalCall) {
+              throw new Error('Potential reentrancy attack detected.');
+              // this.reentrancyFlag = true;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Function to detect potential reentrancy vulnerabilities
+  detectReentrancyVulnerabilities(ast) {
+    const reentrancyVulnerabilities = [];
+
+    // Look for lambda expressions defining contract functions
+    ast.body.forEach(node => {
+        if (node.type === 'VariableDeclaration' && node.declarations[0].init.type === 'CallExpression') {
+            const functionName = node.declarations[0].id.name;
+            const functionBody = node.declarations[0].init.arguments[1].body;
+
+            // Look for withdraw function
+            if (functionName === 'DepositFunds') {
+                const balances = findBalancesDeclaration(functionBody);
+
+                // Look for withdraw case
+                if (balances) {
+                    const withdrawCases = findWithdrawCases(functionBody, balances);
+                    if (withdrawCases.length > 0) {
+                        reentrancyVulnerabilities.push({
+                            function: functionName,
+                            cases: withdrawCases
+                        });
+                    }
+                }
+            }
+        }
+    });
+
+    return reentrancyVulnerabilities;
+  }
+
+  // Helper function to find balances declaration
+  findBalancesDeclaration(node) {
+    if (node.type === 'CallExpression' && node.callee.name === 'make-hash') {
+        return node;
+    } else if (node.body) {
+        for (const childNode of node.body) {
+            const result = findBalancesDeclaration(childNode);
+            if (result) return result;
+        }
+    }
+    return null;
+  }
+
+  // Helper function to find withdraw cases
+  findWithdrawCases(node, balances) {
+    const withdrawCases = [];
+
+    if (node.type === 'CallExpression' && node.callee.name === 'case') {
+        for (const branch of node.arguments.slice(1)) {
+            if (branch.type === 'ArrayExpression' && branch.elements[0].value === 'withdraw') {
+                const withdrawBody = branch.elements[1];
+                const balance = findHashRefUsage(withdrawBody, balances);
+
+                if (balance) {
+                    const sent = findSentFunds(withdrawBody);
+                    withdrawCases.push({
+                        body: withdrawBody,
+                        balance,
+                        sent
+                    });
+                }
+            }
+        }
+    } else if (node.body) {
+        for (const childNode of node.body) {
+            const result = findWithdrawCases(childNode, balances);
+            withdrawCases.push(...result);
+        }
+    }
+
+    return withdrawCases;
+  }
+
+  // Helper function to find hash-ref usage in withdraw function
+  findHashRefUsage(node, balances) {
+    if (node.type === 'CallExpression' && node.callee.name === 'hash-ref' && node.arguments[0].name === balances.declarations[0].id.name) {
+        return node.arguments[1];
+    } else if (node.body) {
+        for (const childNode of node.body) {
+            const result = findHashRefUsage(childNode, balances);
+            if (result) return result;
+        }
+    }
+    return null;
+  }
+
+  // Helper function to find sent variable usage in withdraw function
+  findSentFunds(node) {
+    if (node.type === 'CallExpression' && node.callee.name === 'set!') {
+        if (node.arguments[0].name === 'sent') {
+            return node.arguments[1];
+        }
+    } else if (node.body) {
+        for (const childNode of node.body) {
+            const result = findSentFunds(childNode);
+            if (result) return result;
+        }
+    }
+    return null;
+  }
+  */
+
 };
 
 class ScopingEnvironment {
@@ -524,11 +606,5 @@ class FunctionDef {
 class GasLimitReachedError extends Error {
   constructor(contract) {
     super(`${contract} has reached the gas limit.`);
-  }
-}
-
-class ReentrancyError extends Error {
-  constructor(contract) {
-    super(`${contract} has detected reenterancy vulnerability.`);
   }
 }
