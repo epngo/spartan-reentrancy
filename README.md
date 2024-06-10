@@ -1,3 +1,9 @@
+# SpartanScript-Reentrancy
+
+My graduate thesis project modifies SpartanScript’s interpreter to check smart contract functions that deal with transactions and mark any reentrant vulnerabilities. The addition of new detection functions and the define-r expression checks for locks, modifiers, the checks-effects-interactions pattern, and other vulnerabilities. To demonstrate SpartanScript’s new prevention measures, various reentrancy attacks, such as basic, cross-function, and cross-contracts were created in contracts. Key strategies on how to detect such attacks are implemented in the interpreter so that it warns the developer when such vulnerabilities arises. The results showcased the modified SpartanScript’s ability to identify and mark most vulnerable contracts successfully.
+
+========================================================
+
 # SpartanScript
 
 SpartanScript is a scripting language written in javascript for writing smart contracts. 
